@@ -1,0 +1,12 @@
+{
+ "nature": "SYNTHÉTIQUE (données fictives, même forme que les sources réelles)",
+ "graine": 2026,
+ "periode": [
+  "2025-01-01",
+  "2026-11-01"
+ ],
+ "evenements_bruts": 3135,
+ "lignes_comptages": 191712,
+ "compteurs": 12,
+ "stations_lovelo": 12
+}

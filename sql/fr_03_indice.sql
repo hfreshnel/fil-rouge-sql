@@ -1,0 +1,16 @@
+-- Fil rouge — Livrable final : indice de surfréquentation par événement — RENDU DE GROUPE
+--
+-- Méthode imposée :
+--  1. Zone : rattacher chaque lieu (venues) aux compteurs à moins de 800 m et aux stations Lovélo à moins de 500 m
+--     -> remplir event_zone avec la fonction distance_m().
+--  2. Fenêtre : de 1 h avant le début à 1 h après la fin de chaque occurrence (event_occurrences).
+--  3. Référence : même créneau, même jour de semaine, sur les 4 semaines précédentes,
+--     EN EXCLUANT les créneaux où un autre événement a lieu dans la même zone.
+--  4. Indice = passages observés / passages de référence (moyenne). NULL si aucun capteur ou référence nulle.
+--
+-- À livrer :
+--  R1. INSERT INTO event_zone ... (rattachement)
+--  R2. Une vue v_indice_evenement(event_uid, begin_ts, counter_id, observe, attendu, indice)
+--  R3. Top 10 des événements par indice moyen, avec RANK()
+--  R4. Part des événements sans aucun capteur à proximité (couverture) — à commenter dans la Dataset Card
+--  R5. (option Lovélo) baisse moyenne de vélos disponibles pendant la fenêtre vs la référence

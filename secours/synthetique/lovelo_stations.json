@@ -1,0 +1,86 @@
+[
+ {
+  "station_id": "LV001",
+  "name": "Station Le 106",
+  "lat": 49.438,
+  "lon": 1.0774,
+  "capacity": 30
+ },
+ {
+  "station_id": "LV002",
+  "name": "Station Théâtre des Arts",
+  "lat": 49.4427,
+  "lon": 1.0854,
+  "capacity": 30
+ },
+ {
+  "station_id": "LV003",
+  "name": "Station Kindarena",
+  "lat": 49.4494,
+  "lon": 1.0622,
+  "capacity": 30
+ },
+ {
+  "station_id": "LV004",
+  "name": "Station Zénith de Rouen",
+  "lat": 49.4009,
+  "lon": 1.047,
+  "capacity": 15
+ },
+ {
+  "station_id": "LV005",
+  "name": "Station Musée des Beaux-Arts",
+  "lat": 49.4461,
+  "lon": 1.0926,
+  "capacity": 25
+ },
+ {
+  "station_id": "LV006",
+  "name": "Station Panorama XXL",
+  "lat": 49.4456,
+  "lon": 1.0737,
+  "capacity": 20
+ },
+ {
+  "station_id": "LV007",
+  "name": "Station Hangar 23",
+  "lat": 49.44,
+  "lon": 1.1006,
+  "capacity": 20
+ },
+ {
+  "station_id": "LV008",
+  "name": "Station Chapelle Corneille",
+  "lat": 49.4468,
+  "lon": 1.0948,
+  "capacity": 20
+ },
+ {
+  "station_id": "LV009",
+  "name": "Station Parc des Expositions",
+  "lat": 49.401,
+  "lon": 1.0591,
+  "capacity": 25
+ },
+ {
+  "station_id": "LV010",
+  "name": "Station Jardin des Plantes",
+  "lat": 49.4262,
+  "lon": 1.0786,
+  "capacity": 20
+ },
+ {
+  "station_id": "LV011",
+  "name": "Station Quais bas rive gauche",
+  "lat": 49.4384,
+  "lon": 1.0878,
+  "capacity": 20
+ },
+ {
+  "station_id": "LV012",
+  "name": "Station Théâtre Charles Dullin",
+  "lat": 49.4108,
+  "lon": 1.0372,
+  "capacity": 25
+ }
+]

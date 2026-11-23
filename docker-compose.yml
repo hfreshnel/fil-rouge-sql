@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: fil-rouge-pg
+    environment:
+      POSTGRES_USER: etl
+      POSTGRES_PASSWORD: etl
+      POSTGRES_DB: metropole
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/sql:ro
+    command: >
+      postgres -c shared_buffers=512MB -c work_mem=32MB
+               -c track_io_timing=on -c max_parallel_workers_per_gather=2
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etl -d metropole"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

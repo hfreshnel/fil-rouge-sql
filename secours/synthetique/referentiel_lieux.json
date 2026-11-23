@@ -1,0 +1,92 @@
+[
+ {
+  "name": "Le 106 – Salle des Musiques Actuelles",
+  "city": "Rouen",
+  "lat": 49.4365,
+  "lon": 1.0786
+ },
+ {
+  "name": "Théâtre des Arts",
+  "city": "Rouen",
+  "lat": 49.4412,
+  "lon": 1.0866
+ },
+ {
+  "name": "Kindarena",
+  "city": "Rouen",
+  "lat": 49.4479,
+  "lon": 1.0634
+ },
+ {
+  "name": "Zénith de Rouen",
+  "city": "Le Grand-Quevilly",
+  "lat": 49.3994,
+  "lon": 1.0482
+ },
+ {
+  "name": "Musée des Beaux-Arts",
+  "city": "Rouen",
+  "lat": 49.4446,
+  "lon": 1.0938
+ },
+ {
+  "name": "Panorama XXL",
+  "city": "Rouen",
+  "lat": 49.4441,
+  "lon": 1.0749
+ },
+ {
+  "name": "Hangar 23",
+  "city": "Rouen",
+  "lat": 49.4385,
+  "lon": 1.1018
+ },
+ {
+  "name": "Chapelle Corneille",
+  "city": "Rouen",
+  "lat": 49.4453,
+  "lon": 1.096
+ },
+ {
+  "name": "Parc des Expositions",
+  "city": "Rouen",
+  "lat": 49.3995,
+  "lon": 1.0603
+ },
+ {
+  "name": "Jardin des Plantes",
+  "city": "Rouen",
+  "lat": 49.4247,
+  "lon": 1.0798
+ },
+ {
+  "name": "Quais bas rive gauche",
+  "city": "Rouen",
+  "lat": 49.4369,
+  "lon": 1.089
+ },
+ {
+  "name": "Théâtre Charles Dullin",
+  "city": "Le Grand-Quevilly",
+  "lat": 49.4093,
+  "lon": 1.0384
+ },
+ {
+  "name": "Espace Culturel François Mitterrand",
+  "city": "Canteleu",
+  "lat": 49.441,
+  "lon": 1.0213
+ },
+ {
+  "name": "Le Rive Gauche",
+  "city": "Saint-Étienne-du-Rouvray",
+  "lat": 49.3786,
+  "lon": 1.1047
+ },
+ {
+  "name": "Halle aux Toiles",
+  "city": "Rouen",
+  "lat": 49.4418,
+  "lon": 1.0917
+ }
+]
