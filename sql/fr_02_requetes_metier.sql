@@ -51,6 +51,55 @@ ORDER BY heures_manquantes DESC;
 -- Q2. Pour chaque compteur et chaque heure, comparez les passages à la moyenne des 4 mêmes créneaux
 --     (même jour de semaine, même heure) des 4 semaines précédentes. Indice = observé / moyenne.
 --     (indice : LAG(passages, 168) sur une série horaire complète, ou une auto-jointure sur ts - k * 7 jours)
+--
+-- Choix : LAG sur v_calendrier (Q1). Une semaine = 168 heures. Comme le calendrier n'a AUCUN trou
+-- (une ligne par heure, NULL si la mesure manque), reculer de 168 lignes = reculer de 7 jours exactement.
+-- Sur counts_hourly directement, ce serait faux : avec une heure absente, 168 lignes plus haut = plus d'une semaine.
+-- Règles (cf. docs/profilage.md et sql/fr_03_indice.sql) :
+--   - une semaine sans mesure (NULL) ne compte pas dans la moyenne : moyenne des semaines disponibles ;
+--   - nb_semaines dit sur combien de semaines (0 à 4) la référence repose, pour pouvoir filtrer ;
+--   - indice NULL (jamais 0) si l'heure observée manque, ou si la référence est absente ou nulle.
+-- Limite : les ts sont en UTC. La semaine qui suit un changement d'heure, « même heure » 7 jours plus tôt
+-- correspond à 1 h de décalage en heure de Paris (8 h devient 7 h ou 9 h). Effet faible, assumé.
+
+CREATE OR REPLACE VIEW v_comparaison_4sem AS
+WITH semaines AS (                                  -- passages du même créneau 1, 2, 3 et 4 semaines avant
+    SELECT counter_id, ts, passages,
+           LAG(passages, 168) OVER w AS s1,
+           LAG(passages, 336) OVER w AS s2,
+           LAG(passages, 504) OVER w AS s3,
+           LAG(passages, 672) OVER w AS s4
+    FROM v_calendrier
+    WINDOW w AS (PARTITION BY counter_id ORDER BY ts)
+),
+reference AS (                                      -- moyenne des semaines disponibles (NULL ignorés)
+    SELECT counter_id, ts, passages,
+           num_nonnulls(s1, s2, s3, s4) AS nb_semaines,
+           (COALESCE(s1, 0) + COALESCE(s2, 0) + COALESCE(s3, 0) + COALESCE(s4, 0))::numeric
+               / NULLIF(num_nonnulls(s1, s2, s3, s4), 0) AS attendu   -- NULL si aucune semaine
+    FROM semaines
+)
+SELECT counter_id, ts,
+       passages                                     AS observe,
+       round(attendu, 2)                            AS attendu,
+       nb_semaines,
+       round(passages / NULLIF(attendu, 0), 2)      AS indice   -- NULL si observé manquant ou attendu nul
+FROM reference;
+
+-- Exemple : les 10 heures les plus au-dessus de l'habitude au compteur le plus fréquenté (Eco 38 - Pont Corneille),
+-- sur une référence complète (4 semaines) et d'au moins 50 passages attendus.
+-- Sans seuil, le classement est écrasé par des références quasi nulles. Cas réel : Eco 37, mardi 23/06/2026 8 h,
+-- 178 passages pour 0,25 attendus -> indice 712, parce que le compteur était à 0 (en panne) les semaines d'avant.
+-- D'où la règle du profilage : exclure les pannes (Q4) de la référence de l'indice.
+SELECT k.ts AT TIME ZONE 'Europe/Paris' AS heure_paris, k.observe, k.attendu, k.indice
+FROM v_comparaison_4sem k
+JOIN counters USING (counter_id)
+WHERE counters.name = 'Eco 38 - Pont Corneille'
+  AND k.nb_semaines = 4
+  AND k.attendu >= 50
+  AND k.indice IS NOT NULL                         -- en tri décroissant, les NULL passeraient en tête
+ORDER BY k.indice DESC
+LIMIT 10;
 
 -- ===== Séance 3 =====
 -- Q3. Mesurez Q2 avec EXPLAIN (ANALYZE, BUFFERS) sur toute la table.
