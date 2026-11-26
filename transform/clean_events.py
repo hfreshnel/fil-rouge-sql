@@ -33,23 +33,49 @@ STATUS = {1: "programme", 2: "reporte", 3: "en_ligne", 4: "complet", 5: "annule"
 
 # ---------- utilitaires ----------
 def text_fr(value) -> str | None:
-    """Les champs OpenAgenda sont souvent multilingues : {'fr': '...', 'en': '...'}."""
+    """Récupère prioritairement le contenu français."""
     if value is None:
         return None
+
     if isinstance(value, dict):
-        return value.get("fr") or next((v for v in value.values() if v), None)
+        return value.get("fr")
+
     return str(value)
 
 
 def clean_text(value) -> str:
-    # TODO : lire le texte français (text_fr), retirer les balises HTML, décoder les entités, normaliser les espaces
-    raise NotImplementedError
+    """Nettoie un texte OpenAgenda et conserve la version française."""
+    value = text_fr(value)
+
+    if value is None:
+        return ""
+
+    value = html.unescape(str(value))
+    value = TAG_RE.sub(" ", value)
+    value = SPACE_RE.sub(" ", value)
+
+    return value.strip()
 
 
 def normalize_name(name: str | None) -> str:
-    """'Le 106 – Salle des Musiques Actuelles' -> '106 musiques actuelles'."""
-    # TODO : minuscules, sans accents (unicodedata), sans ponctuation, sans les mots de STOP_WORDS
-    raise NotImplementedError
+    """Normalise un nom de lieu pour faciliter les comparaisons."""
+    if not name:
+        return ""
+
+    name = str(name).lower()
+    name = unicodedata.normalize("NFKD", name)
+    name = "".join(
+        char for char in name
+        if not unicodedata.combining(char)
+    )
+
+    name = PUNCT_RE.sub(" ", name)
+    words = [
+        word for word in SPACE_RE.split(name.strip())
+        if word and word not in STOP_WORDS
+    ]
+
+    return " ".join(words)
 
 
 def parse_ts(value: str | None) -> datetime | None:
@@ -86,22 +112,221 @@ class CleanEvent:
 
 
 # ---------- règles ----------
+
 def validate_and_clean(raw: dict) -> tuple[CleanEvent | None, str | None]:
-    """Renvoie (événement propre, None) ou (None, raison du rejet)."""
-    # TODO : appliquer les règles de rejet, construire un CleanEvent (occurrences triées, statut, mots-clés, flags)
-    raise NotImplementedError
+    """Valide et nettoie un événement OpenAgenda."""
+
+    # 1. Vérification de l'identifiant
+    uid = raw.get("uid")
+
+    if uid is None or str(uid).strip() == "":
+        return None, "uid_manquant"
+
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return None, "uid_manquant"
+
+    # 2. Nettoyage et validation du titre
+    title = clean_text(raw.get("title"))
+
+    if not title:
+        return None, "titre_vide"
+
+    # 3. Nettoyage de la description
+    description = clean_text(raw.get("description"))
+
+    # 4. Nettoyage des mots-clés
+    raw_keywords = text_fr(raw.get("keywords"))
+    keywords = []
+
+    if isinstance(raw_keywords, list):
+        for keyword in raw_keywords:
+            cleaned = clean_text(keyword).lower()
+
+            if cleaned and cleaned not in keywords:
+                keywords.append(cleaned)
+
+    keywords.sort()
+
+    # 5. Validation et conversion des dates
+    timings = raw.get("timings") or []
+
+    if not timings:
+        return None, "aucune_date"
+
+    occurrences = []
+    date_incoherente = False
+
+    for timing in timings:
+        begin = parse_ts(timing.get("begin"))
+        end = parse_ts(timing.get("end"))
+
+        if begin is None or end is None or end < begin:
+            date_incoherente = True
+            continue
+
+        occurrences.append((begin, end))
+
+    # Si aucune occurrence valide ne reste, rejeter l'événement
+    if not occurrences:
+        return None, "dates_incoherentes"
+
+    occurrences.sort(key=lambda occurrence: occurrence[0])
+
+    # 6. Récupération du lieu
+    location = raw.get("location") or {}
+
+    venue_name = clean_text(location.get("name")) or None
+    venue_norm = normalize_name(venue_name)
+    city = clean_text(location.get("city")) or None
+
+    # 7. Vérification des coordonnées géographiques
+    lat = location.get("latitude")
+    lon = location.get("longitude")
+
+    try:
+        lat = float(lat) if lat is not None else None
+        lon = float(lon) if lon is not None else None
+    except (TypeError, ValueError):
+        lat, lon = None, None
+
+    # 8. Gestion des anomalies
+    flags = []
+
+    # Signaler les dates incohérentes ignorées
+    if date_incoherente:
+        flags.append("date_incoherente_ignoree")
+
+    # Les coordonnées absentes ou hors zone sont mises à NULL
+    if not in_bbox(lat, lon):
+        lat, lon = None, None
+        flags.append("geoloc_absente_ou_hors_zone")
+
+    # 9. Récupération du statut et de la date de mise à jour
+    status_code = raw.get("status")
+    status = STATUS.get(status_code, "inconnu")
+
+    updated_at = parse_ts(raw.get("updatedAt"))
+
+    # 10. Construction de l'événement propre
+    event = CleanEvent(
+        uid=uid,
+        title=title,
+        description=description,
+        keywords=keywords,
+        status=status,
+        updated_at=updated_at,
+        venue_name=venue_name,
+        venue_norm=venue_norm,
+        city=city,
+        lat=lat,
+        lon=lon,
+        occurrences=occurrences,
+        flags=flags
+    )
+
+    return event, None
 
 
 def deduplicate(events: list[CleanEvent]) -> tuple[list[CleanEvent], list[dict]]:
-    """Doublons par uid (garde le plus récent) puis doublons « métier » entre uids différents."""
-    # TODO : 1) même uid -> garder le plus récent (updated_at)  2) même (titre normalisé, lieu normalisé, 1re date) -> doublon
-    raise NotImplementedError
+    """Supprime les doublons par UID puis les doublons métier."""
+
+    # Étape 1 : dédoublonnage par UID
+    by_uid = {}
+    rejected = []
+
+    for event in events:
+        if event.uid not in by_uid:
+            by_uid[event.uid] = event
+            continue
+
+        existing = by_uid[event.uid]
+
+        existing_date = existing.updated_at or datetime.min.replace(tzinfo=timezone.utc)
+        new_date = event.updated_at or datetime.min.replace(tzinfo=timezone.utc)
+
+        if new_date > existing_date:
+            rejected.append({
+                "reason": "doublon_uid",
+                "uid": existing.uid
+            })
+            by_uid[event.uid] = event
+        else:
+            rejected.append({
+                "reason": "doublon_uid",
+                "uid": event.uid
+            })
+
+    # Étape 2 : dédoublonnage métier
+    kept = []
+    seen = set()
+
+    for event in by_uid.values():
+        first_date = event.occurrences[0][0] if event.occurrences else None
+
+        key = (
+            normalize_name(event.title),
+            event.venue_norm,
+            first_date
+        )
+
+        if key in seen:
+            rejected.append({
+                "reason": "doublon_metier",
+                "uid": event.uid
+            })
+            continue
+
+        seen.add(key)
+        kept.append(event)
+
+    return kept, rejected
 
 
-def match_venue(venue_norm: str, city: str | None, referentiel: list[dict], seuil: float = 0.85) -> dict | None:
-    """Rapprochement approximatif d'un lieu avec le référentiel (même ville si connue)."""
-    # TODO : difflib.SequenceMatcher sur les noms normalisés, même ville si connue, None sous le seuil
-    raise NotImplementedError
+
+def match_venue(
+    venue_norm: str,
+    city: str | None,
+    referentiel: list[dict],
+    seuil: float = 0.85
+) -> dict | None:
+    """Rapproche un lieu du référentiel avec une comparaison approximative."""
+
+    if not venue_norm:
+        return None
+
+    best_match = None
+    best_score = 0.0
+
+    for venue in referentiel:
+        ref_name = normalize_name(venue.get("name"))
+
+        if not ref_name:
+            continue
+
+        # Si la ville est connue, on privilégie les lieux de cette ville
+        ref_city = venue.get("city")
+
+        if city and ref_city:
+            if city.strip().lower() != ref_city.strip().lower():
+                continue
+
+        score = difflib.SequenceMatcher(
+            None,
+            venue_norm,
+            ref_name
+        ).ratio()
+
+        if score > best_score:
+            best_score = score
+            best_match = venue
+
+    if best_score >= seuil:
+        return best_match
+
+    return None
+
 
 
 def run(raw_events: list[dict], referentiel: list[dict]) -> dict:
@@ -135,30 +360,79 @@ def load_jsonl(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+
 def to_postgres(events: list[CleanEvent], dsn: str) -> None:
-    """Chargement IDEMPOTENT : upsert des lieux et des événements, occurrences remplacées."""
+    """Charge les événements de manière idempotente dans PostgreSQL."""
     import psycopg
+
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         for ev in events:
+            # Par défaut, aucun lieu n'est associé à l'événement.
+            venue_id = None
+
+            # On crée ou met à jour un lieu uniquement s'il est connu.
+            if ev.venue_name and ev.venue_norm:
+                cur.execute(
+                    """
+                    INSERT INTO venues (name, name_norm, city, lat, lon, source)
+                    VALUES (%s, %s, %s, %s, %s, 'openagenda')
+                    ON CONFLICT (name_norm, city) DO UPDATE
+                    SET lat = COALESCE(venues.lat, EXCLUDED.lat),
+                        lon = COALESCE(venues.lon, EXCLUDED.lon)
+                    RETURNING venue_id
+                    """,
+                    (
+                        ev.venue_name,
+                        ev.venue_norm,
+                        ev.city,
+                        ev.lat,
+                        ev.lon
+                    )
+                )
+                venue_id = cur.fetchone()[0]
+
+            # Insertion ou mise à jour de l'événement.
             cur.execute(
-                """INSERT INTO venues (name, name_norm, city, lat, lon, source)
-                   VALUES (%s, %s, %s, %s, %s, 'openagenda')
-                   ON CONFLICT (name_norm, city) DO UPDATE
-                     SET lat = COALESCE(venues.lat, EXCLUDED.lat), lon = COALESCE(venues.lon, EXCLUDED.lon)
-                   RETURNING venue_id""",
-                (ev.venue_name or "(inconnu)", ev.venue_norm or "inconnu", ev.city, ev.lat, ev.lon))
-            venue_id = cur.fetchone()[0]
+                """
+                INSERT INTO events (
+                    event_uid, title, description, keywords,
+                    venue_id, status, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (event_uid) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    keywords = EXCLUDED.keywords,
+                    venue_id = EXCLUDED.venue_id,
+                    status = EXCLUDED.status,
+                    updated_at = EXCLUDED.updated_at,
+                    loaded_at = now()
+                """,
+                (
+                    ev.uid,
+                    ev.title,
+                    ev.description,
+                    ev.keywords,
+                    venue_id,
+                    ev.status,
+                    ev.updated_at
+                )
+            )
+
+            # Remplacement des occurrences de cet événement.
             cur.execute(
-                """INSERT INTO events (event_uid, title, description, keywords, venue_id, status, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (event_uid) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description,
-                     keywords = EXCLUDED.keywords, venue_id = EXCLUDED.venue_id, status = EXCLUDED.status,
-                     updated_at = EXCLUDED.updated_at, loaded_at = now()""",
-                (ev.uid, ev.title, ev.description, ev.keywords, venue_id, ev.status, ev.updated_at))
-            cur.execute("DELETE FROM event_occurrences WHERE event_uid = %s", (ev.uid,))
-            cur.executemany("INSERT INTO event_occurrences VALUES (%s, %s, %s)",
-                            [(ev.uid, b, e) for b, e in ev.occurrences])
-        conn.commit()
+                "DELETE FROM event_occurrences WHERE event_uid = %s",
+                (ev.uid,)
+            )
+
+            cur.executemany(
+                """
+                INSERT INTO event_occurrences (event_uid, begin_ts, end_ts)
+                VALUES (%s, %s, %s)
+                """,
+                [(ev.uid, begin, end) for begin, end in ev.occurrences]
+            )
+
 
 
 if __name__ == "__main__":

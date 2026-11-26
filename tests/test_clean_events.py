@@ -90,3 +90,85 @@ def test_run_produit_des_statistiques_coherentes():
     res = run([raw(uid=1), raw(uid=1), raw(uid=3, timings=[])], referentiel=[])
     s = res["stats"]
     assert (s["entree"], s["sortie"], s["rejets"]) == (3, 1, 2)
+
+def test_date_incoherente_est_signalee_si_autres_dates_valides():
+    raw = {
+        "uid": 987654,
+        "title": {"fr": "Festival de Rouen"},
+        "timings": [
+            {
+                "begin": "2026-06-10T10:00:00Z",
+                "end": "2026-06-10T12:00:00Z"
+            },
+            {
+                "begin": "date_invalide",
+                "end": "2026-06-11T12:00:00Z"
+            }
+        ],
+        "location": {
+            "name": "Zénith",
+            "city": "Rouen",
+            "latitude": 49.4432,
+            "longitude": 1.0993
+        }
+    }
+
+    event, reason = validate_and_clean(raw)
+
+    assert reason is None
+    assert event is not None
+    assert len(event.occurrences) == 1
+    assert "date_incoherente_ignoree" in event.flags
+
+
+def test_toutes_les_dates_invalides_rejettent_evenement():
+    raw = {
+        "uid": 987655,
+        "title": {"fr": "Festival de Rouen"},
+        "timings": [
+            {
+                "begin": "date_invalide",
+                "end": "date_invalide"
+            }
+        ],
+        "location": {}
+    }
+
+    event, reason = validate_and_clean(raw)
+
+    assert event is None
+    assert reason == "dates_incoherentes"
+
+
+def test_texte_multilingue_privilegie_francais():
+    raw = {
+        "uid": 987656,
+        "title": {
+            "en": "Rouen Festival",
+            "fr": "Festival de Rouen"
+        },
+        "description": {
+            "en": "English description",
+            "fr": "<p>Un festival à Rouen</p>"
+        },
+        "timings": [
+            {
+                "begin": "2026-06-10T10:00:00Z",
+                "end": "2026-06-10T12:00:00Z"
+            }
+        ],
+        "location": {}
+    }
+
+    event, reason = validate_and_clean(raw)
+
+    assert reason is None
+    assert event.title == "Festival de Rouen"
+    assert event.description == "Un festival à Rouen"
+
+def test_nettoyage_html_et_entites():
+    from transform.clean_events import clean_text
+
+    resultat = clean_text("<p>Bonjour</p><p>Rouen &amp; sa métropole</p>")
+
+    assert resultat == "Bonjour Rouen & sa métropole"
