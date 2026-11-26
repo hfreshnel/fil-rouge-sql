@@ -1,3 +1,4 @@
+
 # Secrets (OA_KEY, HF_TOKEN) — ne jamais committer
 .env
 .env.*
@@ -15,6 +16,8 @@ venv/
 data/
 logs/
 *.parquet
+evenements_bruts.jsonl
+quarantaine_evenements.jsonl
 
 # Jeu réel distribué sur clé USB (ne pas redistribuer)
 secours/reel/

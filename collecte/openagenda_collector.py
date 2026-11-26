@@ -21,7 +21,12 @@ import asyncio
 import logging
 import os
 import calendar
+import queue
 import aiohttp
+from dotenv import load_dotenv
+
+import json
+from pathlib import Path
 
 API = os.getenv("OA_API", "https://api.openagenda.com/v2")   # secours : API locale, voir secours/README.md
 log = logging.getLogger("openagenda")
@@ -196,8 +201,70 @@ def monthly_windows(start: str, end: str) -> list[tuple[str, str]]:
 
     return windows
 
+def pending_windows(
+    windows: list[tuple[str, str]],
+    completed: list[str]
+) -> list[tuple[str, str]]:
+    """Retourne les fenêtres mensuelles qui restent à collecter."""
+
+    completed_set = set(completed)
+
+    return [
+        (gte, lt)
+        for gte, lt in windows
+        if gte[:7] not in completed_set
+    ]
+
+def load_checkpoint(path: str, slug: str, start: str, end: str) -> list[str]:
+    """Charge le checkpoint uniquement s'il correspond à la collecte."""
+
+    checkpoint = Path(path)
+
+    if not checkpoint.exists():
+        return []
+
+    with checkpoint.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if (
+        data.get("slug") != slug
+        or data.get("start") != start
+        or data.get("end") != end
+    ):
+        log.warning("Checkpoint incompatible : nouvelle collecte.")
+        return []
+
+    return data.get("completed_months", [])
 
 
+def save_checkpoint(
+    path: str,
+    completed: list[str],
+    slug: str,
+    start: str,
+    end: str
+) -> None:
+    """Enregistre la progression de la collecte."""
+
+    checkpoint = Path(path)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = checkpoint.with_suffix(".tmp")
+
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "slug": slug,
+                "start": start,
+                "end": end,
+                "completed_months": sorted(set(completed))
+            },
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    temporary.replace(checkpoint)
 async def jsonl_writer(queue: asyncio.Queue, output: str) -> None:
     """Écrit les événements dans un fichier JSONL par lots de 500."""
 
@@ -227,60 +294,149 @@ async def jsonl_writer(queue: asyncio.Queue, output: str) -> None:
                 log.info("%s événements écrits dans %s", len(batch), output)
                 batch.clear()
 
+async def collect_and_save_window(
+    session,
+    sem,
+    uid: int,
+    gte: str,
+    lt: str,
+    output: str,
+    checkpoint_path: str,
+    completed: list[str],
+    checkpoint_lock: asyncio.Lock,
+    slug: str,
+    start: str,
+    end: str
+) -> int:
+    """Collecte, enregistre et valide une fenêtre mensuelle."""
 
-async def main(a) -> None:
-    key = os.environ["OA_KEY"]
-
-    # Limite le nombre de requêtes simultanées
-    sem = asyncio.Semaphore(5)
-
-    # File de communication entre les collecteurs et l'écrivain
+    temporary_output = output + ".tmp"
     queue = asyncio.Queue(maxsize=1000)
 
+    writer_task = asyncio.create_task(
+        jsonl_writer(queue, temporary_output)
+    )
+
+    try:
+        total = await collect_window(
+            session, sem, uid, gte, lt, queue
+        )
+    finally:
+        await queue.put(None)
+        await writer_task
+
+    # Le fichier devient définitif uniquement après réussite.
+    Path(temporary_output).replace(Path(output))
+
+    async with checkpoint_lock:
+        completed.append(gte[:7])
+
+        save_checkpoint(
+            checkpoint_path,
+            completed,
+            slug,
+            start,
+            end
+        )
+
+    return total
+
+def merge_monthly_files(
+    windows: list[tuple[str, str]],
+    output: str,
+    data_dir: str
+) -> None:
+    """Fusionne les fichiers mensuels dans un fichier JSONL final."""
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = output_path.with_suffix(".tmp")
+
+    with temporary.open("w", encoding="utf-8") as final_file:
+        for gte, _ in windows:
+            month = gte[:7]
+            monthly_file = Path(data_dir) / f"{month}.jsonl"
+
+            if monthly_file.exists():
+                with monthly_file.open("r", encoding="utf-8") as source:
+                    for line in source:
+                        final_file.write(line)
+
+    temporary.replace(output_path)
+async def main(a) -> None:
+    load_dotenv()
+    key = os.environ["OA_KEY"]
+
+    sem = asyncio.Semaphore(5)
     timeout = aiohttp.ClientTimeout(total=60)
+
+    # Dossier des fichiers mensuels et du checkpoint
+    data_dir = Path("data/openagenda")
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_path = str(data_dir / "checkpoint.json")
 
     async with aiohttp.ClientSession(
         headers={"key": key},
         timeout=timeout
     ) as session:
 
-        # 1. Récupération de l'identifiant de l'agenda
         uid = await agenda_uid(session, sem, a.slug)
 
-        # 2. Découpage de la période en fenêtres mensuelles
+        # Fenêtres mensuelles demandées
         windows = monthly_windows(a.start, a.end)
 
-        log.info("%s fenêtres mensuelles à collecter", len(windows))
-
-        # 3. Lancement de l'écrivain
-        writer_task = asyncio.create_task(
-            jsonl_writer(queue, a.out)
+        # Reprise : ignorer les mois déjà terminés
+        completed = load_checkpoint(
+            checkpoint_path,
+            a.slug,
+            a.start,
+            a.end
         )
-
-        total = 0
-
-        try:
-            # 4. Collecte parallèle des fenêtres
-            async with asyncio.TaskGroup() as group:
-                tasks = [
-                    group.create_task(
-                        collect_window(session, sem, uid, gte, lt, queue)
-                    )
-                    for gte, lt in windows
-                ]
-
-            total = sum(task.result() for task in tasks)
-
-        finally:
-            # 5. Arrêt propre de l'écrivain
-            await queue.put(None)
-            await writer_task
+        pending = pending_windows(windows, completed)
 
         log.info(
-            "Collecte terminée : %s événements enregistrés dans %s",
-            total,
-            a.out
+            "%s mois déjà terminés, %s mois à collecter",
+            len(completed),
+            len(pending)
         )
+
+        checkpoint_lock = asyncio.Lock()
+        total = 0
+
+        # Collecte parallèle des mois restants
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(
+                    collect_and_save_window(
+                        session,
+                        sem,
+                        uid,
+                        gte,
+                        lt,
+                        str(data_dir / f"{gte[:7]}.jsonl"),
+                        checkpoint_path,
+                        completed,
+                        checkpoint_lock,
+                        a.slug,
+                        a.start,
+                        a.end
+                    )
+                )
+                for gte, lt in pending
+            ]
+
+        total = sum(task.result() for task in tasks)
+
+    # Fusion des fichiers mensuels
+    merge_monthly_files(windows, a.out, str(data_dir))
+
+    log.info(
+        "Collecte terminée : %s nouveaux événements récupérés. Fichier final : %s",
+        total,
+        a.out
+    )
 
 
 

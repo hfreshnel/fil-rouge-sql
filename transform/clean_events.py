@@ -107,6 +107,7 @@ class CleanEvent:
     city: str | None
     lat: float | None
     lon: float | None
+    venue_uid: str | None = None
     occurrences: list[tuple[datetime, datetime]] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
 
@@ -178,6 +179,7 @@ def validate_and_clean(raw: dict) -> tuple[CleanEvent | None, str | None]:
     location = raw.get("location") or {}
 
     venue_name = clean_text(location.get("name")) or None
+    venue_uid = str(location.get("uid")) if location.get("uid") is not None else None
     venue_norm = normalize_name(venue_name)
     city = clean_text(location.get("city")) or None
 
@@ -222,6 +224,7 @@ def validate_and_clean(raw: dict) -> tuple[CleanEvent | None, str | None]:
         city=city,
         lat=lat,
         lon=lon,
+        venue_uid=venue_uid,
         occurrences=occurrences,
         flags=flags
     )
@@ -331,28 +334,70 @@ def match_venue(
 
 def run(raw_events: list[dict], referentiel: list[dict]) -> dict:
     ok, rejected = [], []
+
     for raw in raw_events:
         ev, reason = validate_and_clean(raw)
+
         if reason:
             rejected.append({"reason": reason, "uid": raw.get("uid")})
         else:
             ok.append(ev)
+
     kept, dup = deduplicate(ok)
     rejected += dup
+
     matched = 0
+
     for ev in kept:
-        ref = match_venue(ev.venue_norm, ev.city, referentiel)
+        # 1. Recherche prioritaire par identifiant OpenAgenda
+        ref = next(
+            (
+                v for v in referentiel
+                if ev.venue_uid is not None
+                and str(v.get("openagenda_uid")) == ev.venue_uid
+            ),
+            None
+        )
+
+        # 2. Ancien mécanisme de rapprochement par nom et ville
+        if ref is None:
+            ref = match_venue(ev.venue_norm, ev.city, referentiel)
+
+        # 3. Traitement du lieu trouvé
         if ref:
             matched += 1
+
             ev.venue_name = ref["name"]
             ev.venue_norm = normalize_name(ref["name"])
-            if ev.lat is None and in_bbox(ref.get("lat"), ref.get("lon")):
-                ev.lat, ev.lon = ref["lat"], ref["lon"]
+
+            ref_lat = ref.get("lat")
+            ref_lon = ref.get("lon")
+
+            # Pour le référentiel BAN, seules les coordonnées
+            # ayant le statut "valide" sont utilisables.
+            if "ban" in ref:
+                if ref.get("ban_status") == "valide":
+                    ref_lat = ref["ban"].get("lat")
+                    ref_lon = ref["ban"].get("lon")
+                else:
+                    ref_lat = ref_lon = None
+
+            # Compléter uniquement une géolocalisation manquante
+            if ev.lat is None and in_bbox(ref_lat, ref_lon):
+                ev.lat, ev.lon = ref_lat, ref_lon
                 ev.flags.append("geoloc_depuis_referentiel")
-    return {"events": kept, "rejected": rejected,
-            "stats": {"entree": len(raw_events), "sortie": len(kept), "rejets": len(rejected),
-                      "lieux_rapproches": matched,
-                      "sans_geoloc": sum(1 for e in kept if e.lat is None)}}
+
+    return {
+        "events": kept,
+        "rejected": rejected,
+        "stats": {
+            "entree": len(raw_events),
+            "sortie": len(kept),
+            "rejets": len(rejected),
+            "lieux_rapproches": matched,
+            "sans_geoloc": sum(1 for e in kept if e.lat is None)
+        }
+    }
 
 
 def load_jsonl(path: str) -> list[dict]:
@@ -372,10 +417,16 @@ def to_postgres(events: list[CleanEvent], dsn: str) -> None:
 
             # On crée ou met à jour un lieu uniquement s'il est connu.
             if ev.venue_name and ev.venue_norm:
+                source = (
+                    "referentiel"
+                    if "geoloc_depuis_referentiel" in ev.flags
+                    else "openagenda"
+                )
+
                 cur.execute(
                     """
                     INSERT INTO venues (name, name_norm, city, lat, lon, source)
-                    VALUES (%s, %s, %s, %s, %s, 'openagenda')
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (name_norm, city) DO UPDATE
                     SET lat = COALESCE(venues.lat, EXCLUDED.lat),
                         lon = COALESCE(venues.lon, EXCLUDED.lon)
@@ -386,7 +437,8 @@ def to_postgres(events: list[CleanEvent], dsn: str) -> None:
                         ev.venue_norm,
                         ev.city,
                         ev.lat,
-                        ev.lon
+                        ev.lon,
+                        source
                     )
                 )
                 venue_id = cur.fetchone()[0]
