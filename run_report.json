@@ -1,0 +1,43 @@
+{
+  "started_at": "2026-11-26T19:33:47.497133+00:00",
+  "status": "success",
+  "collection_cleaning": {
+    "entree": 6919,
+    "sortie": 6186,
+    "rejets": 733,
+    "lieux_rapproches": 6186,
+    "sans_geoloc": 4
+  },
+  "quality": {
+    "passed": true,
+    "metrics": {
+      "total": 6919,
+      "valid": 6186,
+      "rejected": 733,
+      "rejection_rate": 0.1059,
+      "warnings": 4,
+      "errors": 0
+    },
+    "errors": [],
+    "warnings": [
+      {
+        "uid": 37830784,
+        "reason": "geolocalisation_absente"
+      },
+      {
+        "uid": 86774018,
+        "reason": "geolocalisation_absente"
+      },
+      {
+        "uid": 93896964,
+        "reason": "geolocalisation_absente"
+      },
+      {
+        "uid": 1357477,
+        "reason": "geolocalisation_absente"
+      }
+    ]
+  },
+  "duration_seconds": 1.54,
+  "finished_at": "2026-11-26T19:33:49.037255+00:00"
+}
