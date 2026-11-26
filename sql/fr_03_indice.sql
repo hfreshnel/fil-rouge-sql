@@ -217,3 +217,54 @@ JOIN events e USING (event_uid)
 LEFT JOIN venues v USING (venue_id)
 WHERE k.rang <= 10
 ORDER BY k.rang, e.title;
+
+-- ===== R4. Couverture : part des événements sans aucun capteur à proximité =====
+-- À reporter et commenter dans la Dataset Card (section limites).
+-- Périmètre : événements non annulés ayant au moins une occurrence (ceux que l'indice cherche à mesurer).
+-- Chaque événement est classé dans UNE catégorie, de la plus bloquante à la meilleure, pour voir où on le perd :
+--   1. lieu sans coordonnées          -> impossible à rattacher
+--   2. aucun capteur à proximité      -> ni compteur à moins de 800 m, ni station à moins de 500 m
+--   3. station Lovélo seulement       -> pas d'indice vélo (R2 ne porte que sur les compteurs), utile pour R5
+--   4. compteur, mais aucun indice    -> référence absente (autres événements), panne ou heures manquantes
+--   5. au moins un indice calculé
+-- « Sans aucun capteur » (la question R4) = catégories 1 + 2.
+CREATE OR REPLACE VIEW v_couverture AS
+WITH capteurs_par_lieu AS (                         -- ce que chaque lieu a dans sa zone
+    SELECT venue_id,
+           bool_or(sensor_kind = 'counter') AS a_compteur,
+           bool_or(sensor_kind = 'lovelo')  AS a_station
+    FROM event_zone
+    GROUP BY venue_id
+),
+avec_indice AS MATERIALIZED (                       -- événements avec au moins un indice (R2 calculée une seule fois)
+    SELECT DISTINCT event_uid FROM v_indice_evenement WHERE indice IS NOT NULL
+)
+SELECT e.event_uid,
+       CASE WHEN v.lat IS NULL OR v.lon IS NULL     THEN '1. lieu sans coordonnées'
+            WHEN c.venue_id IS NULL                 THEN '2. aucun capteur à proximité'
+            WHEN NOT c.a_compteur                   THEN '3. station Lovélo seulement'
+            WHEN i.event_uid IS NULL                THEN '4. compteur, mais aucun indice'
+            ELSE                                         '5. au moins un indice'
+       END AS categorie
+FROM events e
+LEFT JOIN venues v USING (venue_id)
+LEFT JOIN capteurs_par_lieu c USING (venue_id)
+LEFT JOIN avec_indice i USING (event_uid)
+WHERE e.status IS DISTINCT FROM 'annule'
+  AND EXISTS (SELECT 1 FROM event_occurrences o WHERE o.event_uid = e.event_uid);
+
+-- R4a. Répartition des événements par catégorie.
+SELECT categorie,
+       count(*)                                              AS evenements,
+       round(100.0 * count(*) / sum(count(*)) OVER (), 1)    AS pct      -- sum(...) OVER () : total de toutes les lignes
+FROM v_couverture
+GROUP BY categorie
+ORDER BY categorie;
+
+-- R4b. La réponse à R4, en une ligne.
+--      NULLIF(count(*), 0) : sans événement chargé, les pourcentages valent NULL au lieu d'une division par zéro.
+SELECT count(*)                                                                                   AS evenements,
+       round(100.0 * count(*) FILTER (WHERE categorie < '3') / NULLIF(count(*), 0), 1)            AS pct_sans_aucun_capteur,
+       round(100.0 * count(*) FILTER (WHERE categorie < '4') / NULLIF(count(*), 0), 1)            AS pct_sans_compteur,
+       round(100.0 * count(*) FILTER (WHERE categorie = '5. au moins un indice') / NULLIF(count(*), 0), 1) AS pct_avec_indice
+FROM v_couverture;
