@@ -17,7 +17,6 @@ import argparse
 import html
 import json
 import re
-import struct
 import sys
 import unicodedata
 import urllib.request
@@ -28,9 +27,9 @@ from pathlib import Path
 import pandas as pd
 
 try:                                    # python -m chargement.profilage
-    from chargement.load_comptages import PORTAIL, guess
+    from chargement.load_comptages import PORTAIL, coordonnees, guess
 except ImportError:                     # python chargement/profilage.py
-    from load_comptages import PORTAIL, guess
+    from load_comptages import PORTAIL, coordonnees, guess
 
 RACINE = Path(__file__).resolve().parent.parent
 SECOURS = RACINE / "secours" / ("reel" if (RACINE / "secours" / "reel").exists() else "synthetique")
@@ -72,35 +71,6 @@ def normaliser(texte) -> str:
 def dans_metropole(lat, lon) -> bool:
     return (lat is not None and lon is not None and not pd.isna(lat) and not pd.isna(lon)
             and BBOX["lat"][0] <= lat <= BBOX["lat"][1] and BBOX["lon"][0] <= lon <= BBOX["lon"][1])
-
-
-def point_wkb(b) -> tuple[float, float] | None:
-    """Décode un point au format WKB (ou EWKB avec SRID) -> (lat, lon). C'est le format de `location` dans le Parquet."""
-    if not isinstance(b, (bytes, bytearray)) or len(b) < 21:
-        return None
-    ordre = "<" if b[0] == 1 else ">"                # 1er octet : 1 = little endian, 0 = big endian
-    type_geom = struct.unpack(ordre + "I", b[1:5])[0]
-    debut = 9 if type_geom & 0x20000000 else 5       # EWKB : 4 octets de SRID après le type
-    if type_geom & 0xFFFF != 1 or len(b) < debut + 16:  # 1 = Point
-        return None
-    x, y = struct.unpack(ordre + "dd", b[debut:debut + 16])
-    return y, x                                      # WKB stocke (x = longitude, y = latitude)
-
-
-def coordonnees(valeur) -> tuple[float, float] | None:
-    """Accepte les formes rencontrées : WKB (Parquet), « lat, lon » (CSV du portail), {lat, lon}."""
-    if isinstance(valeur, (bytes, bytearray)):
-        return point_wkb(valeur)
-    if isinstance(valeur, dict):
-        lat, lon = valeur.get("lat"), valeur.get("lon")
-        return (float(lat), float(lon)) if lat is not None and lon is not None else None
-    if isinstance(valeur, str) and "," in valeur:
-        try:
-            lat, lon = (float(x) for x in valeur.split(",")[:2])
-            return lat, lon
-        except ValueError:
-            return None
-    return None
 
 
 def texte_fr(valeur) -> tuple[str, list[str]]:
