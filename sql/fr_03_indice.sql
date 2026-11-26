@@ -76,3 +76,101 @@ FROM venues v
 LEFT JOIN event_zone z USING (venue_id)
 GROUP BY v.venue_id, v.name, v.city
 ORDER BY compteurs DESC, v.name;
+
+-- ===== R2. Indice de surfréquentation par occurrence et par compteur (v_indice_evenement) =====
+-- Une ligne par (occurrence, compteur de la zone). Une occurrence sans compteur garde UNE ligne, avec
+-- counter_id et indice NULL : elle reste visible, et R4 la compte dans la couverture.
+--
+-- Règles (méthode imposée + docs/profilage.md) :
+--  - Fenêtre : de begin_ts - 1 h à end_ts + 1 h. On prend toutes les heures qui la CHEVAUCHENT
+--    (une heure h compte si h < fin et h + 1 h > début) : 20:30-22:45 -> fenêtre 19:30-23:45 -> heures 19 h à 23 h.
+--  - Observé : somme des passages du compteur sur ces heures.
+--  - Référence : la même fenêtre 1, 2, 3 et 4 semaines avant (k = 1..4), décalée en HEURE DE PARIS
+--    (AT TIME ZONE) : un concert à 20 h est comparé à 20 h, même autour des changements d'heure.
+--    attendu = moyenne des semaines retenues ; nb_semaines = combien ont été retenues (0 à 4).
+--  - Une fenêtre (observée ou de référence) ne vaut que si TOUTES ses heures sont mesurées et hors panne (Q4) :
+--    une somme amputée d'une heure serait trop basse. Sinon elle vaut NULL.
+--  - Une semaine de référence est écartée si une autre occurrence (non annulée) a lieu au même moment
+--    dans la zone du même compteur : elle gonflerait l'habitude.
+--  - Les événements annulés sont exclus : ils n'ont pas eu lieu (statut 'annule', cf. transform/clean_events.py).
+--  - indice = observe / attendu, NULL (jamais 0) si pas de compteur, observé NULL, ou attendu NULL ou nul.
+CREATE OR REPLACE VIEW v_indice_evenement AS
+WITH pannes AS MATERIALIZED (                       -- 33 séries (Q4), calculées une seule fois
+    SELECT counter_id, debut, fin FROM v_pannes
+),
+occurrences AS (                                    -- occurrences à analyser, avec leur fenêtre ± 1 h
+    SELECT o.event_uid, o.begin_ts, e.venue_id,
+           o.begin_ts - interval '1 hour' AS debut_fenetre,
+           o.end_ts   + interval '1 hour' AS fin_fenetre
+    FROM event_occurrences o
+    JOIN events e USING (event_uid)
+    WHERE e.status IS DISTINCT FROM 'annule'        -- IS DISTINCT FROM : un statut NULL est gardé
+),
+occupations AS MATERIALIZED (                       -- pour chaque compteur, les fenêtres des occurrences de sa zone
+    SELECT z.sensor_id AS counter_id, oc.event_uid, oc.begin_ts, oc.debut_fenetre, oc.fin_fenetre
+    FROM occurrences oc
+    JOIN event_zone z ON z.venue_id = oc.venue_id AND z.sensor_kind = 'counter'
+),
+fenetres AS (                                       -- k = 0 : fenêtre observée ; k = 1..4 : semaines de référence
+    SELECT oc.event_uid, oc.begin_ts, oc.counter_id, s.k,
+           ((oc.debut_fenetre AT TIME ZONE 'Europe/Paris') - s.k * interval '7 days') AT TIME ZONE 'Europe/Paris' AS debut_k,
+           ((oc.fin_fenetre   AT TIME ZONE 'Europe/Paris') - s.k * interval '7 days') AT TIME ZONE 'Europe/Paris' AS fin_k
+    FROM occupations oc
+    CROSS JOIN generate_series(0, 4) AS s(k)
+),
+heures AS (                                         -- chaque heure de chaque fenêtre, mesurée ou non
+    SELECT f.event_uid, f.begin_ts, f.counter_id, f.k, f.debut_k, f.fin_k, c.passages,
+           EXISTS (SELECT 1 FROM pannes p
+                   WHERE p.counter_id = f.counter_id AND h.ts BETWEEN p.debut AND p.fin) AS en_panne
+    FROM fenetres f
+    CROSS JOIN LATERAL generate_series(date_trunc('hour', f.debut_k), f.fin_k, interval '1 hour') AS h(ts)
+    LEFT JOIN mv_calendrier c ON c.counter_id = f.counter_id AND c.ts = h.ts   -- NULL si hors calendrier ou manquante
+    WHERE h.ts < f.fin_k
+),
+sommes AS (                                         -- passages de chaque fenêtre, NULL si incomplète ou en panne
+    SELECT event_uid, begin_ts, counter_id, k, debut_k, fin_k,
+           CASE WHEN count(passages) = count(*)     -- count(passages) ignore les NULL : toutes les heures mesurées
+                 AND NOT bool_or(en_panne)          -- et aucune en panne
+                THEN sum(passages) END AS passages
+    FROM heures
+    GROUP BY event_uid, begin_ts, counter_id, k, debut_k, fin_k
+),
+-- Semaines de référence occupées par un autre événement. Comparer chaque semaine à TOUTES les occurrences
+-- prenait 40 s (pas d'index possible sur une CTE). Deux fenêtres ne peuvent se chevaucher que si elles touchent
+-- un même jour : on répète chaque fenêtre pour chaque jour qu'elle touche, et on joint sur (compteur, jour).
+-- PostgreSQL fait alors une jointure par hachage sur de tout petits groupes.
+occupations_jours AS MATERIALIZED (
+    SELECT o.counter_id, o.event_uid, o.begin_ts, o.debut_fenetre, o.fin_fenetre, j.jour
+    FROM occupations o
+    CROSS JOIN LATERAL generate_series(date_trunc('day', o.debut_fenetre), o.fin_fenetre, interval '1 day') AS j(jour)
+),
+bloquees AS MATERIALIZED (                          -- calculée UNE fois (sinon recalculée pour chaque ligne)
+    SELECT DISTINCT f.event_uid, f.begin_ts, f.counter_id, f.k
+    FROM fenetres f
+    CROSS JOIN LATERAL generate_series(date_trunc('day', f.debut_k), f.fin_k, interval '1 day') AS j(jour)
+    JOIN occupations_jours o ON o.counter_id = f.counter_id AND o.jour = j.jour   -- même compteur, même jour
+    WHERE f.k > 0
+      AND (o.event_uid, o.begin_ts) <> (f.event_uid, f.begin_ts)                  -- une AUTRE occurrence
+      AND o.debut_fenetre < f.fin_k AND o.fin_fenetre > f.debut_k                 -- les deux fenêtres se chevauchent
+),
+retenues AS (                                       -- observé (k = 0) + semaines de référence non bloquées
+    SELECT s.*
+    FROM sommes s
+    LEFT JOIN bloquees b USING (event_uid, begin_ts, counter_id, k)   -- anti-jointure : garder ce qui n'est PAS bloqué
+    WHERE b.k IS NULL                               -- k = 0 n'est jamais bloqué (bloquees ne contient que k > 0)
+),
+par_compteur AS (
+    SELECT event_uid, begin_ts, counter_id,
+           max(passages)   FILTER (WHERE k = 0) AS observe,
+           avg(passages)   FILTER (WHERE k > 0) AS attendu,     -- avg ignore les semaines NULL
+           count(passages) FILTER (WHERE k > 0) AS nb_semaines
+    FROM retenues
+    GROUP BY event_uid, begin_ts, counter_id
+)
+SELECT oc.event_uid, oc.begin_ts, p.counter_id,
+       p.observe,
+       round(p.attendu, 2)                          AS attendu,
+       coalesce(p.nb_semaines, 0)                   AS nb_semaines,
+       round(p.observe / NULLIF(p.attendu, 0), 2)   AS indice
+FROM occurrences oc
+LEFT JOIN par_compteur p USING (event_uid, begin_ts);   -- garde les occurrences sans compteur
