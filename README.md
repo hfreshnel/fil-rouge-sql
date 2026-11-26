@@ -102,7 +102,10 @@ psql -h localhost -U etl -d metropole -f sql/fr_01_schema.sql
 ```bash
 # Profilage des sources (chiffres de docs/profilage.md), puis chargement des comptages vélo
 python chargement/profilage.py
-python chargement/load_comptages.py                       # ou --file secours/synthetique/eco-counter-data.csv
+python chargement/load_comptages.py                       # télécharge depuis le portail
+# ou, sans retélécharger : --file data/brut/eco-counter-data.parquet (copie faite par le profilage)
+# ou, en secours : --file secours/synthetique/eco-counter-data.csv
+# lignes rejetées et raison : data/quarantaine/comptages_rejetes.csv
 
 # Collecte des événements
 python collecte/openagenda_collector.py
@@ -130,6 +133,13 @@ Détails : [`secours/README.md`](secours/README.md).
 
 _À compléter au fil des séances (outils, règles de nettoyage, optimisation retenue, seuils qualité…)._
 
+**Chargement des comptages** (règles de [`docs/profilage.md`](docs/profilage.md)) :
+- Deux lignes pour le même (compteur, heure) sont deux versions de la même mesure, pas deux sens de
+  circulation : on en garde une (non supprimée, puis validée > corrigée > brute) au lieu de les additionner.
+- `status` est conservé dans `counts_hourly.status` (`brut`, `corrige`, `valide`) pour pouvoir filtrer
+  sur la donnée validée si besoin.
+- Les coordonnées des compteurs sont décodées depuis `location` (point WKB) : le jeu réel n'a pas de colonnes lat/lon.
+
 ## Limites de l'indice
 
 _À compléter : ce que l'indice mesure et ne mesure pas, couverture (part des événements sans capteur)._
@@ -140,6 +150,7 @@ _À compléter : ce que l'indice mesure et ne mesure pas, couverture (part des �
 |---|---|---|
 | Mise en place du dépôt (arborescence, README, config) | Claude Code | Génération du squelette à partir du kit |
 | Profilage (`chargement/profilage.py`, `docs/profilage.md`) | Claude Code | Script de profilage, remplissage de la fiche à partir de sa sortie, règles relues par le groupe |
+| Chargement des comptages (`chargement/load_comptages.py`, `tests/test_load_comptages.py`) | Claude Code | Corrections du chargement d'après la fiche d'anomalies et tests associés, relus et expliqués |
 | _à compléter_ | | |
 
 Chaque membre du groupe est en mesure d'expliquer l'ensemble du code.

@@ -51,6 +51,7 @@ CREATE TABLE counts_hourly (
     counter_id   TEXT NOT NULL REFERENCES counters(counter_id),
     ts           TIMESTAMPTZ NOT NULL,       -- début de l'heure
     passages     INTEGER CHECK (passages >= 0),
+    status       TEXT CHECK (status IN ('brut', 'corrige', 'valide')),  -- statut normalisé de la source (NULL si absent)
     PRIMARY KEY (counter_id, ts)
 );
 
