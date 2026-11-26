@@ -174,3 +174,46 @@ SELECT oc.event_uid, oc.begin_ts, p.counter_id,
        round(p.observe / NULLIF(p.attendu, 0), 2)   AS indice
 FROM occurrences oc
 LEFT JOIN par_compteur p USING (event_uid, begin_ts);   -- garde les occurrences sans compteur
+
+-- ===== R3. Top 10 des événements par indice moyen, avec RANK() =====
+-- Indice moyen d'un événement = moyenne de ses indices, toutes occurrences et tous compteurs de la zone confondus.
+--
+-- Choix :
+--  - Seuil de robustesse, pour le CLASSEMENT seulement (la vue R2 garde tout) : une mesure n'entre que si
+--    au moins 20 passages étaient attendus sur la fenêtre. Sous ce seuil, l'indice est surtout du bruit :
+--    12 passages pour 4 attendus donnent 3,0. Sur le jeu synthétique, ce seuil écarte 3 % des mesures.
+--  - RANK() et pas ROW_NUMBER() : deux événements à égalité ont le même rang, et le suivant saute
+--    (1, 2, 2, 4). Le « top 10 » peut donc compter plus de 10 lignes en cas d'égalité au 10e rang.
+--    DENSE_RANK() ne sauterait pas de rang (1, 2, 2, 3).
+--  - Le rang est calculé sur l'indice non arrondi : arrondir avant créerait de fausses égalités.
+WITH mesures AS (
+    SELECT * FROM v_indice_evenement
+    WHERE indice IS NOT NULL
+      AND attendu >= 20                             -- seuil de robustesse (voir ci-dessus)
+),
+par_evenement AS (
+    SELECT event_uid,
+           avg(indice)                       AS indice_moyen,
+           count(*)                          AS nb_mesures,         -- couples (occurrence, compteur)
+           count(DISTINCT begin_ts)          AS nb_occurrences,
+           count(DISTINCT counter_id)        AS nb_compteurs,
+           sum(observe)                      AS observe_total,
+           round(sum(attendu))               AS attendu_total
+    FROM mesures
+    GROUP BY event_uid
+),
+classement AS (
+    SELECT *, RANK() OVER (ORDER BY indice_moyen DESC) AS rang
+    FROM par_evenement
+)
+SELECT k.rang,
+       e.title                               AS evenement,
+       v.name                                AS lieu,
+       round(k.indice_moyen, 2)              AS indice_moyen,
+       k.nb_occurrences, k.nb_compteurs, k.nb_mesures,
+       k.observe_total, k.attendu_total
+FROM classement k
+JOIN events e USING (event_uid)
+LEFT JOIN venues v USING (venue_id)
+WHERE k.rang <= 10
+ORDER BY k.rang, e.title;
