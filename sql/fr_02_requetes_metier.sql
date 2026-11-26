@@ -117,7 +117,7 @@ LIMIT 10;
 --     Proposez et mesurez UNE optimisation (index, réécriture, partitionnement par mois, vue matérialisée).
 --     Collez plan avant / plan après et le gain dans docs/optimisation.md.
 --
--- Optimisation retenue : vue matérialisée mv_calendrier (créée sous Q1a), 2,4 s -> 1,3 s.
+-- Optimisation retenue : vue matérialisée mv_calendrier (créée sous Q1a), 2,6 s -> 1,3 s.
 -- Mesures reproductibles : psql -h localhost -U etl -d metropole -f sql/q3_mesure.sql
 -- Plans, chiffres et pistes écartées : docs/optimisation.md
 EXPLAIN (ANALYZE, BUFFERS) SELECT k.ts AT TIME ZONE 'Europe/Paris' AS heure_paris, k.observe, k.attendu, k.indice
@@ -133,3 +133,72 @@ LIMIT 10;
 -- ===== Bonus qualité (utile pour la séance 5) =====
 -- Q4. Détectez les pannes probables : séquences d'au moins 24 heures consécutives à 0 passage
 --     pour un compteur habituellement actif (technique « gaps and islands » avec ROW_NUMBER).
+--
+-- Gaps and islands : on ne garde que les heures à 0, numérotées 1, 2, 3… par compteur (ROW_NUMBER).
+-- Dans une suite d'heures CONSÉCUTIVES, ts avance d'1 h et le numéro de 1 : ts - numéro × 1 h reste constant.
+-- Dès qu'une heure non nulle (ou manquante) coupe la suite, ts saute plus loin que le numéro et la constante change.
+-- Cette constante (« ilot ») identifie donc chaque série ; un GROUP BY dessus donne début, fin et durée.
+--   ts      passages  numéro  ts - numéro h
+--   10:00   0         1       09:00   ┐ même îlot : 3 h à 0
+--   11:00   0         2       09:00   │
+--   12:00   0         3       09:00   ┘
+--   13:00   5         -       (écartée)
+--   14:00   0         4       10:00   ← nouvel îlot
+-- On s'appuie sur mv_calendrier : une heure manquante y est NULL (pas 0), elle coupe donc la série.
+-- On ne déclare pas « panne » ce qu'on ne connaît pas.
+-- Effet visible : chaque nuit de passage à l'heure d'hiver, l'heure 00:00 UTC manque pour TOUS les compteurs
+-- (anomalie de la source, cf. docs/profilage.md). La panne d'Eco 22 est ainsi coupée en deux séries
+-- (1 710 h puis 758 h) le 26/10/2025. Sans conséquence pour l'indice : les deux séries sont exclues.
+--
+-- « Habituellement actif » : médiane des totaux journaliers (jours UTC entièrement mesurés) >= 24 passages,
+-- soit au moins 1 passage/h en moyenne. Pour un tel compteur, 24 h à 0 n'ont rien de normal.
+-- Critère calculé sur TOUTE l'histoire du compteur, pas sur les semaines précédentes (Q2) : une panne
+-- fait tomber la référence des semaines suivantes à 0, et la panne suivante paraîtrait alors « normale »
+-- (cas réel : Eco 37, 1 087 h à 0 à partir du 27/02/2026, juste après son trou de 87 jours : 0 attendu).
+-- Le compteur le plus calme (Eco 19 - Bords de Seine) a une médiane de 50 passages/jour : les 35 sont actifs.
+
+CREATE OR REPLACE VIEW v_pannes AS
+WITH jours AS (                                     -- total de chaque jour entièrement mesuré
+    SELECT counter_id, date_trunc('day', ts) AS jour, sum(passages) AS total
+    FROM mv_calendrier
+    GROUP BY counter_id, date_trunc('day', ts)
+    HAVING count(passages) = 24                     -- count(col) ignore les NULL : 24 heures mesurées
+),
+activite AS (                                       -- activité habituelle du compteur
+    SELECT counter_id, percentile_cont(0.5) WITHIN GROUP (ORDER BY total) AS mediane_jour
+    FROM jours
+    GROUP BY counter_id
+),
+zeros AS (                                          -- heures à 0, avec l'identifiant de leur îlot
+    SELECT counter_id, ts,
+           ts - ROW_NUMBER() OVER (PARTITION BY counter_id ORDER BY ts) * interval '1 hour' AS ilot
+    FROM mv_calendrier
+    WHERE passages = 0
+),
+series AS (                                         -- une ligne par îlot
+    SELECT counter_id, min(ts) AS debut, max(ts) AS fin, count(*) AS heures
+    FROM zeros
+    GROUP BY counter_id, ilot
+)
+SELECT s.counter_id, s.debut, s.fin, s.heures, a.mediane_jour
+FROM series s
+JOIN activite a USING (counter_id)
+WHERE s.heures >= 24                                -- au moins 24 h consécutives à 0
+  AND a.mediane_jour >= 24;                         -- compteur habituellement actif
+
+-- Q4a. Bilan (attendu d'après docs/profilage.md : 33 séries, 5 073 heures, 9 compteurs).
+SELECT count(*)                   AS series,
+       sum(heures)                AS heures_en_panne,
+       count(DISTINCT counter_id) AS compteurs
+FROM v_pannes;
+
+-- Q4b. Les 10 pannes les plus longues (heures de Paris).
+SELECT counters.name,
+       p.debut AT TIME ZONE 'Europe/Paris' AS debut_paris,
+       p.fin   AT TIME ZONE 'Europe/Paris' AS fin_paris,
+       p.heures,
+       round(p.heures / 24.0, 1)           AS jours
+FROM v_pannes p
+JOIN counters USING (counter_id)
+ORDER BY p.heures DESC
+LIMIT 10;
