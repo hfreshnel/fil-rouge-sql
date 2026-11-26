@@ -28,6 +28,17 @@ FROM bornes b
 CROSS JOIN LATERAL generate_series(b.debut, b.fin, interval '1 hour') AS h(ts)   -- toutes les heures du compteur
 LEFT JOIN counts_hourly c ON c.counter_id = b.counter_id AND c.ts = h.ts;
 
+-- Optimisation retenue en Q3 (voir docs/optimisation.md) : le calendrier est MATÉRIALISÉ.
+-- v_calendrier reste la définition ; mv_calendrier en est une copie stockée, triée et indexée,
+-- que lisent Q2, Q4 et l'indice. Le tri à la création range les lignes sur disque dans l'ordre
+-- (counter_id, ts) : l'index les relit dans cet ordre sans tri.
+-- À rafraîchir après chaque chargement : load_comptages.py le fait, et ce script aussi (REFRESH ci-dessous).
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendrier AS
+    SELECT counter_id, ts, passages FROM v_calendrier ORDER BY counter_id, ts;
+CREATE UNIQUE INDEX IF NOT EXISTS mv_calendrier_cle ON mv_calendrier (counter_id, ts);
+REFRESH MATERIALIZED VIEW mv_calendrier;
+ANALYZE mv_calendrier;
+
 -- Q1b. Calendrier d'UN compteur : Eco 37 - Pont Boieldieu, le plus troué d'après le profilage.
 --      Le calendrier complet fait ~40 000 lignes ; on affiche ici le début de son trou de 87 jours
 --      (dernière mesure le 02/12/2025 à 07:00 UTC). Retirer le filtre sur ts pour avoir tout le calendrier.
@@ -52,7 +63,7 @@ ORDER BY heures_manquantes DESC;
 --     (même jour de semaine, même heure) des 4 semaines précédentes. Indice = observé / moyenne.
 --     (indice : LAG(passages, 168) sur une série horaire complète, ou une auto-jointure sur ts - k * 7 jours)
 --
--- Choix : LAG sur v_calendrier (Q1). Une semaine = 168 heures. Comme le calendrier n'a AUCUN trou
+-- Choix : LAG sur le calendrier complet (Q1), lu dans sa version matérialisée mv_calendrier (Q3). Une semaine = 168 heures. Comme le calendrier n'a AUCUN trou
 -- (une ligne par heure, NULL si la mesure manque), reculer de 168 lignes = reculer de 7 jours exactement.
 -- Sur counts_hourly directement, ce serait faux : avec une heure absente, 168 lignes plus haut = plus d'une semaine.
 -- Règles (cf. docs/profilage.md et sql/fr_03_indice.sql) :
@@ -69,7 +80,7 @@ WITH semaines AS (                                  -- passages du même crénea
            LAG(passages, 336) OVER w AS s2,
            LAG(passages, 504) OVER w AS s3,
            LAG(passages, 672) OVER w AS s4
-    FROM v_calendrier
+    FROM mv_calendrier                              -- avant l'optimisation Q3 : FROM v_calendrier
     WINDOW w AS (PARTITION BY counter_id ORDER BY ts)
 ),
 reference AS (                                      -- moyenne des semaines disponibles (NULL ignorés)
@@ -105,6 +116,19 @@ LIMIT 10;
 -- Q3. Mesurez Q2 avec EXPLAIN (ANALYZE, BUFFERS) sur toute la table.
 --     Proposez et mesurez UNE optimisation (index, réécriture, partitionnement par mois, vue matérialisée).
 --     Collez plan avant / plan après et le gain dans docs/optimisation.md.
+--
+-- Optimisation retenue : vue matérialisée mv_calendrier (créée sous Q1a), 2,4 s -> 1,3 s.
+-- Mesures reproductibles : psql -h localhost -U etl -d metropole -f sql/q3_mesure.sql
+-- Plans, chiffres et pistes écartées : docs/optimisation.md
+EXPLAIN (ANALYZE, BUFFERS) SELECT k.ts AT TIME ZONE 'Europe/Paris' AS heure_paris, k.observe, k.attendu, k.indice
+FROM v_comparaison_4sem k
+JOIN counters USING (counter_id)
+WHERE counters.name = 'Eco 38 - Pont Corneille'
+  AND k.nb_semaines = 4
+  AND k.attendu >= 50
+  AND k.indice IS NOT NULL                         
+ORDER BY k.indice DESC
+LIMIT 10;
 
 -- ===== Bonus qualité (utile pour la séance 5) =====
 -- Q4. Détectez les pannes probables : séquences d'au moins 24 heures consécutives à 0 passage

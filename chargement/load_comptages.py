@@ -245,6 +245,14 @@ def load(df: pd.DataFrame, cols: dict) -> None:
                        ON CONFLICT (counter_id, ts) DO UPDATE
                        SET passages = EXCLUDED.passages, status = EXCLUDED.status""")
         cur.execute("ANALYZE counts_hourly")
+        # Le calendrier matérialisé (optimisation Q3, sql/fr_02) est une copie : il faut le recalculer
+        # après chaque chargement, sinon Q2, Q4 et l'indice liraient les anciens comptages.
+        # to_regclass renvoie NULL si la vue n'existe pas encore (fr_02 pas encore exécuté).
+        cur.execute("SELECT to_regclass('mv_calendrier') IS NOT NULL")
+        if cur.fetchone()[0]:
+            cur.execute("REFRESH MATERIALIZED VIEW mv_calendrier")
+            cur.execute("ANALYZE mv_calendrier")
+            print("vue matérialisée mv_calendrier rafraîchie")
         conn.commit()
     print(f"{len(compteurs)} compteurs, {len(heures):,} heures chargées")
 

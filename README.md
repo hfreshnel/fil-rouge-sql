@@ -114,7 +114,8 @@ python collecte/openagenda_collector.py
 pytest -q
 
 # Requêtes SQL
-psql -h localhost -U etl -d metropole -f sql/fr_02_requetes_metier.sql
+psql -h localhost -U etl -d metropole -f sql/fr_02_requetes_metier.sql   # après le chargement des comptages
+psql -h localhost -U etl -d metropole -f sql/q3_mesure.sql               # facultatif : mesures EXPLAIN de Q3
 psql -h localhost -U etl -d metropole -f sql/fr_03_indice.sql
 ```
 
@@ -139,6 +140,12 @@ _À compléter au fil des séances (outils, règles de nettoyage, optimisation r
 - `status` est conservé dans `counts_hourly.status` (`brut`, `corrige`, `valide`) pour pouvoir filtrer
   sur la donnée validée si besoin.
 - Les coordonnées des compteurs sont décodées depuis `location` (point WKB) : le jeu réel n'a pas de colonnes lat/lon.
+
+**Requêtes métier et optimisation** ([`docs/optimisation.md`](docs/optimisation.md)) :
+- Calendrier complet par `generate_series` : une heure sans mesure reste NULL, jamais 0.
+- Q2 par `LAG(passages, 168 × k)` sur ce calendrier sans trou : 168 lignes = 7 jours exactement.
+- Optimisation retenue : vue matérialisée du calendrier, triée et indexée (Q2 : 2,6 s → 1,3 s, plus de tri
+  sur disque). Elle est rafraîchie par `load_comptages.py` après chaque chargement.
 
 ## Limites de l'indice
 
