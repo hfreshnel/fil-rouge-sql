@@ -114,7 +114,8 @@ python collecte/openagenda_collector.py
 pytest -q
 
 # Requêtes SQL
-psql -h localhost -U etl -d metropole -f sql/fr_02_requetes_metier.sql
+psql -h localhost -U etl -d metropole -f sql/fr_02_requetes_metier.sql   # après le chargement des comptages
+psql -h localhost -U etl -d metropole -f sql/q3_mesure.sql               # facultatif : mesures EXPLAIN de Q3
 psql -h localhost -U etl -d metropole -f sql/fr_03_indice.sql
 ```
 
@@ -140,9 +141,25 @@ _À compléter au fil des séances (outils, règles de nettoyage, optimisation r
   sur la donnée validée si besoin.
 - Les coordonnées des compteurs sont décodées depuis `location` (point WKB) : le jeu réel n'a pas de colonnes lat/lon.
 
+**Requêtes métier et optimisation** ([`docs/optimisation.md`](docs/optimisation.md)) :
+- Calendrier complet par `generate_series` : une heure sans mesure reste NULL, jamais 0.
+- Q2 par `LAG(passages, 168 × k)` sur ce calendrier sans trou : 168 lignes = 7 jours exactement.
+- Optimisation retenue : vue matérialisée du calendrier, triée et indexée (Q2 : 2,6 s → 1,3 s, plus de tri
+  sur disque). Elle est rafraîchie par `load_comptages.py` après chaque chargement.
+
 ## Limites de l'indice
 
 _À compléter : ce que l'indice mesure et ne mesure pas, couverture (part des événements sans capteur)._
+
+Premières limites relevées en écrivant R2 (chiffres du jeu synthétique, à refaire sur le jeu réel) :
+- **Référence souvent absente** : la méthode écarte les semaines où un autre événement a lieu dans la zone.
+  Sur un agenda dense (12,8 occurrences par jour, surtout en centre-ville), 90 % des semaines de référence
+  sont écartées et seuls 19 % des couples (occurrence, compteur) ont un indice. On applique la méthode telle
+  quelle et on le signale plutôt que d'aller chercher des semaines plus anciennes.
+- **Événements simultanés** : pendant la fenêtre observée, les passages de tous les événements de la zone se
+  cumulent. L'indice mesure la surfréquentation de la zone pendant l'événement, pas l'effet de cet événement seul.
+- **Jours fériés et vacances** : une semaine de référence tombant un jour férié (ex. 25/12) fait baisser l'attendu.
+- **Zone circulaire** : un compteur à moins de 800 m peut être sur un axe qui ne mène pas au lieu.
 
 ## Usage déclaré de l'IA
 
